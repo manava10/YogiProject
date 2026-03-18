@@ -75,7 +75,8 @@ const allowedOrigins = [
     'https://cheerful-cannoli-94af42.netlify.app',
     'https://foodfreaky.in',
     'https://www.foodfreaky.in',
-    'https://foodfreakyfr-qoh9u.ondigitalocean.app'
+    'https://foodfreakyfr-qoh9u.ondigitalocean.app',
+    'https://sd-pproject1.vercel.app' // Vercel deployment
 ];
 if (process.env.FRONTEND_URL) {
     allowedOrigins.push(process.env.FRONTEND_URL);
