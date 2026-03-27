@@ -34,6 +34,10 @@ This document provides a full technical and product overview of the YogiProject 
 21. [Testing & quality](#21-testing--quality)  
 22. [Glossary](#22-glossary)  
 23. [Revision history (template)](#23-revision-history-template)
+24. [Detailed module-wise project report](#24-detailed-module-wise-project-report)
+25. [End-to-end project workflow (functional + technical)](#25-end-to-end-project-workflow-functional--technical)
+26. [Future enhancement roadmap](#26-future-enhancement-roadmap)
+27. [Complexity and feasibility assessment](#27-complexity-and-feasibility-assessment)
 
 ---
 
@@ -656,5 +660,338 @@ Query: `page`, `limit`, `status`, `startDate`, `endDate`.
 
 ---
 
-*End of FoodFreaky / YogiProject documentation.*
+## 24. Detailed module-wise project report
 
+This section provides a structured breakdown of each major module in the project, its purpose, implementation details, data dependencies, API boundaries, and operational notes.
+
+### 24.1 Authentication & identity module
+
+**Primary files**
+- Backend: `backend/controllers/auth.js`, `backend/routes/auth.js`, `backend/middleware/auth.js`, `backend/models/User.js`
+- Frontend: `frontend/src/pages/LoginPage.jsx`, `RegisterPage.jsx`, `ForgotPasswordPage.jsx`, `ResetPasswordPage.jsx`, `frontend/src/context/AuthContext.js`
+
+**Purpose**
+- Manage user onboarding and secure login lifecycle for all roles (`user`, `rider`, `deliveryadmin`, `admin`).
+
+**What it does**
+- Email/password registration and login.
+- OTP verification for account activation.
+- Google OAuth sign-in (`/api/auth/google`).
+- Password reset flow using tokenized reset links.
+- JWT issuance and protected route access.
+
+**Key business/security rules**
+- Password hash storage (never plain text).
+- JWT required on protected endpoints.
+- Role checks enforced by `authorize(...roles)`.
+- Reset and OTP flows are time-bound and rate limited.
+
+**Data model coupling**
+- Heavy coupling with `User` model fields (`otp`, `isVerified`, `resetPasswordToken`, `role`, `credits`, `favorites`).
+
+**Operational considerations**
+- Requires stable email configuration to avoid OTP/reset failures.
+- Token expiry and frontend local storage synchronization are critical for UX.
+
+### 24.2 Restaurant & menu catalog module
+
+**Primary files**
+- Backend: `backend/controllers/restaurants.js`, `backend/controllers/restaurantsAdmin.js`, `backend/routes/restaurants.js`, `backend/models/Restaurant.js`
+- Frontend: `frontend/src/pages/RestaurantPage.jsx`, `FruitPage.jsx`, `HomePage.jsx`, `frontend/src/components/RestaurantManager.jsx`
+
+**Purpose**
+- Serve catalog discovery for customers and provide CRUD capabilities for admin operators.
+
+**What it does**
+- Public listing/filtering of restaurants and fruit stalls.
+- Detailed menu retrieval per restaurant.
+- Admin-side onboarding and updates (menu item add/edit/delete-like operations via API flows).
+- Accepting-orders toggle for operational control.
+
+**Key business rules**
+- `Restaurant.type` differentiates food vs fruit marketplace.
+- Admin APIs are role-protected.
+- Menu-based server-side order recalculation depends on correctness of this data.
+
+**Data model coupling**
+- `Restaurant` collection drives checkout pricing consistency and reorder flows.
+
+**Operational considerations**
+- Data quality (prices, categories, item names) directly affects billing and chatbot responses.
+
+### 24.3 Cart, checkout, coupon, and credits module
+
+**Primary files**
+- Backend: `backend/controllers/orders.js`, `backend/controllers/coupons.js`, `backend/controllers/credits.js`, `backend/models/Order.js`, `backend/models/Coupon.js`
+- Frontend: `frontend/src/components/Cart.jsx`, `frontend/src/pages/CheckoutPage.jsx`, `frontend/src/context/CartContext.js`
+
+**Purpose**
+- Convert user intent (cart) into financially valid and auditable orders.
+
+**What it does**
+- Cart state management and checkout orchestration.
+- Coupon validation (`/api/coupons/validate`).
+- Credits application and earning logic.
+- Server-side recalculation of item totals, tax, shipping, and final payable amount.
+
+**Key business rules**
+- Client-sent totals are not trusted; backend recomputes from menu.
+- Credits usage capped by server rule (5% ceiling, as documented in project behavior).
+- Coupon validity depends on active status, expiry, and usage constraints.
+
+**Data model coupling**
+- Tight coupling among `Order`, `Coupon`, `User.credits`, and `Restaurant.menu`.
+
+**Operational considerations**
+- Most financially sensitive module; should remain deterministic and tamper-resistant.
+
+### 24.4 Orders lifecycle & fulfillment module
+
+**Primary files**
+- Backend: `backend/controllers/orders.js`, `backend/controllers/admin.js`, `backend/routes/orders.js`, `backend/routes/admin.js`
+- Frontend: `frontend/src/pages/DashboardPage.jsx`, `frontend/src/components/OrderManager.jsx`, `frontend/src/pages/RiderDashboardPage.jsx`
+
+**Purpose**
+- Manage order state transitions from creation to delivery and post-delivery actions.
+
+**What it does**
+- Order creation and retrieval (customer, admin, rider perspectives).
+- Status updates through defined lifecycle.
+- Cancellation, rating, reorder, and invoice retrieval.
+- Rider assignment during delivery transitions.
+
+**Key business rules**
+- Cancellation allowed only at early lifecycle stage.
+- Status updates are role-gated and scope-gated.
+- Delivered status triggers invoice email and reward logic.
+
+**Data model coupling**
+- `Order` is the central transactional record linked to `User` and `Restaurant`.
+
+**Operational considerations**
+- Most cross-functional module: affects customer trust, rider UX, support, and analytics.
+
+### 24.5 Rider operations & live tracking module
+
+**Primary files**
+- Backend: `backend/controllers/admin.js` (location/status updates), order tracking endpoint in orders controller, `backend/models/Order.js`
+- Frontend: `frontend/src/components/RiderLocationSharer.jsx`, `frontend/src/components/OrderTrackingModal.jsx`, `frontend/src/pages/RiderDashboardPage.jsx`
+
+**Purpose**
+- Enable real-time rider location visibility and role-scoped rider workflow.
+
+**What it does**
+- Rider sees assigned orders only.
+- Rider shares geolocation updates periodically.
+- Customer dashboard consumes tracking endpoint to render map updates.
+
+**Key business rules**
+- Tracking visibility constrained to order owner/admin and valid lifecycle state.
+- Assignment required for meaningful rider isolation.
+
+**Data model coupling**
+- Uses `Order.assignedRider` and `Order.riderLocation`.
+
+**Operational considerations**
+- Depends on browser permissions, network quality, and polling cadence.
+
+### 24.6 Admin governance module
+
+**Primary files**
+- Backend: `backend/controllers/admin.js`, `backend/controllers/settings.js`, `backend/routes/admin.js`, `backend/models/Setting.js`
+- Frontend: `frontend/src/pages/SuperAdminPage.jsx`, `frontend/src/components/SettingsManager.jsx`, `CouponManager.jsx`, `RestaurantManager.jsx`
+
+**Purpose**
+- Provide centralized operational control panel for platform governance.
+
+**What it does**
+- Order supervision and intervention.
+- Rider listing and assignment workflows.
+- Coupon management and promotional controls.
+- Credits operations (bulk credit, reset).
+- Global app settings updates.
+
+**Key business rules**
+- Strict admin/deliveryadmin/rider privilege boundaries for each endpoint.
+- Settings impact public storefront behavior (ordering windows and availability).
+
+**Data model coupling**
+- Reads/writes across `Order`, `User`, `Restaurant`, `Coupon`, `Setting`.
+
+**Operational considerations**
+- Strong candidate for audit logging and approval workflows in future versions.
+
+### 24.7 Engagement module (favorites, ratings, profile)
+
+**Primary files**
+- Backend: `backend/controllers/favorites.js`, rating handlers in order flow, user profile APIs in auth flow
+- Frontend: `frontend/src/pages/FavoritesPage.jsx`, `frontend/src/components/Rating.jsx`, `frontend/src/components/UserProfile.jsx`, `frontend/src/context/FavoritesContext.js`
+
+**Purpose**
+- Improve retention and personalization.
+
+**What it does**
+- Favorite/unfavorite restaurants.
+- Collect post-delivery ratings/reviews.
+- Profile updates and account-facing interactions.
+
+**Key business rules**
+- Ratings allowed only in valid delivery-complete context.
+- Favorites are user-scoped and protected.
+
+**Data model coupling**
+- `User.favorites` and `Restaurant.averageRating/numberOfReviews`.
+
+**Operational considerations**
+- Drives recommendation potential and marketplace quality signals.
+
+### 24.8 Chatbot assistant module
+
+**Primary files**
+- Backend: order retrieval endpoints used by chatbot logic
+- Frontend: `frontend/src/components/Chatbot.jsx`, `frontend/src/pages/DashboardPage.jsx`
+
+**Purpose**
+- Reduce navigation friction by enabling conversational order insights.
+
+**What it does**
+- Parses common natural-language intents (latest order, total spent, nth order details, tracking hints).
+- Uses authenticated API calls to retrieve current order data.
+- Maintains conversational context for follow-up queries.
+
+**Design note**
+- Rule-based intent handling (not external LLM-dependent in current implementation).
+
+**Operational considerations**
+- Low infra cost and predictable output, but limited intent flexibility compared with model-based assistants.
+
+### 24.9 Cross-cutting platform module (middleware, logging, validation, error handling)
+
+**Primary files**
+- `backend/middleware/*`, `backend/utils/logger.js`, `backend/index.js`
+
+**Purpose**
+- Apply consistent safety, observability, and reliability guarantees across all APIs.
+
+**What it does**
+- Authentication and authorization checks.
+- Joi validation and request sanitization.
+- Rate limiting for abuse control.
+- Helmet/CORS hardening.
+- Centralized error handling and structured logging.
+
+**Operational considerations**
+- Defines baseline platform posture; regressions here impact every endpoint.
+
+---
+
+## 25. End-to-end project workflow (functional + technical)
+
+### 25.1 Customer journey workflow
+
+1. User opens SPA (Vercel-hosted frontend).  
+2. User signs in or registers (JWT issued on success).  
+3. User browses restaurants/fruit stalls, adds items to cart.  
+4. Checkout calls coupon validation + order create API.  
+5. Backend validates payload, recalculates prices, stores order.  
+6. Admin accepts and progresses order status.  
+7. Rider gets assigned when moving to Out for Delivery.  
+8. Rider shares location; customer tracks order live in dashboard.  
+9. On delivery, invoice and credits logic execute.  
+10. User rates order and may reorder later.
+
+### 25.2 Request lifecycle workflow
+
+1. Frontend builds request with optional JWT bearer token.  
+2. Express middleware chain executes: CORS/Helmet → sanitize → rate limit → auth/authorize (if protected) → Joi validate.  
+3. Controller runs business logic and Mongoose operations.  
+4. Result returned as JSON (or PDF stream for invoice endpoint).  
+5. Frontend state/context updates and UI feedback is shown (toasts/modals/maps).
+
+### 25.3 Role-specific operational workflow
+
+- **User:** browse → order → track → rate.
+- **Rider:** monitor assigned orders → update status/location.
+- **Delivery admin:** manage day-of-delivery operations and status orchestration.
+- **Admin:** full operational authority including settings, catalog, promotions, and reporting exports.
+
+---
+
+## 26. Future enhancement roadmap
+
+### 26.1 High-impact product enhancements
+
+1. **Integrated payment gateways** (UPI/cards/wallets) with webhook-based payment reconciliation.  
+2. **Real-time push architecture** (WebSockets/SSE) for order status and tracking to reduce polling latency.  
+3. **Recommendation engine** (favorites + order history + tags) for personalized discovery.  
+4. **Advanced search** (full-text + typo tolerance + semantic tags).  
+5. **Address book + saved locations** with map pinning and geocoding validation.
+
+### 26.2 Platform/engineering enhancements
+
+1. **Formal automated test pyramid**
+   - Backend integration tests (auth, order lifecycle, coupons, admin role scopes).
+   - Frontend component and route tests for critical flows.
+2. **Observability upgrades**
+   - Metrics dashboards (latency, error rates, conversion funnel).
+   - Request tracing for critical endpoints.
+3. **Background job queue**
+   - Asynchronous invoice/email dispatch and retry strategy.
+4. **Audit and compliance controls**
+   - Immutable admin action logs and sensitive-operation audit trails.
+5. **Configuration governance**
+   - Feature flags for staged rollouts.
+
+### 26.3 Experience enhancements
+
+1. **Progressive Web App capabilities** (offline shell/cache strategy).  
+2. **Multilingual interface** for broader market accessibility.  
+3. **Accessibility hardening** (WCAG-focused audits and remediation).  
+4. **Rider route optimization assistance** with ETA forecasting.
+
+---
+
+## 27. Complexity and feasibility assessment
+
+### 27.1 Current project complexity profile
+
+- **Overall complexity:** **Medium-High**  
+- **Why:** Multi-role architecture, transactional flows, financial calculations, location tracking, and admin governance in one platform.
+
+### 27.2 Complexity by subsystem
+
+| Subsystem | Current Complexity | Primary Drivers |
+|-----------|--------------------|-----------------|
+| Authentication | Medium | OTP, reset flows, OAuth coexistence |
+| Catalog & menus | Medium | Nested menu modeling, admin CRUD quality |
+| Checkout/financial logic | High | Price integrity, coupons, credits constraints |
+| Order lifecycle | High | Status transitions across multiple roles |
+| Live tracking | Medium-High | Geolocation reliability + polling consistency |
+| Admin governance | Medium-High | Broad permission surface and operational coupling |
+| Chatbot (rule-based) | Medium | Intent parsing and context handling |
+| Cross-cutting security/middleware | High | System-wide impact and correctness requirements |
+
+### 27.3 Feasibility to achieve future scope
+
+| Enhancement | Feasibility | Effort Estimate | Risk |
+|-------------|-------------|-----------------|------|
+| Payment gateway integration | High | Medium-High | Compliance + webhook reliability |
+| Real-time status via sockets | High | Medium | Event ordering and reconnect handling |
+| Recommendation engine | Medium-High | Medium | Data modeling and ranking quality |
+| Full automated testing strategy | High | Medium | Initial setup/time investment |
+| Audit logging & observability | High | Medium | Storage growth + dashboarding effort |
+| PWA + offline support | Medium | Medium | Cache invalidation complexity |
+| Route optimization/ETA | Medium | High | Mapping APIs + algorithmic tuning |
+
+### 27.4 Practical delivery strategy (recommended)
+
+1. **Phase 1 (stabilization):** tests + observability + audit logging.  
+2. **Phase 2 (core product):** payment integration + real-time updates.  
+3. **Phase 3 (intelligence):** recommendations + ETA optimization.  
+4. **Phase 4 (experience):** accessibility, multilingual support, PWA maturity.
+
+This sequencing is feasible because the current architecture already has clear module boundaries (routes/controllers/models on backend and context/page/component structure on frontend), making iterative enhancement practical without full rewrites.
+
+---
+
+*End of FoodFreaky / YogiProject documentation.*
