@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import { useSettings } from '../context/SettingsContext';
 import { useToast } from '../context/ToastContext';
 import { useNavigate } from 'react-router-dom';
@@ -15,6 +16,8 @@ const CheckoutPage = () => {
     const { settings, isLoadingSettings } = useSettings();
     const { showError } = useToast();
     const navigate = useNavigate();
+
+    const PLATFORM_FEE_PRICE = 12;
 
     const [address, setAddress] = useState('');
     const [contactNumber, setContactNumber] = useState('');
@@ -152,7 +155,7 @@ const CheckoutPage = () => {
     }
 
     // Calculate max credits that can be used (5% of order value before credits)
-    const orderValueBeforeCredits = subtotal + taxAmount + deliveryCharge - discount;
+    const orderValueBeforeCredits = subtotal + taxAmount + deliveryCharge + PLATFORM_FEE_PRICE - discount;
     const maxCreditsAllowed = Math.floor(orderValueBeforeCredits * 0.05); // Max 5% of order value
     const effectiveCreditsToUse = Math.min(creditsToUse, userCredits, maxCreditsAllowed);
     
@@ -428,9 +431,13 @@ const CheckoutPage = () => {
                                 <span>Delivery Charges</span>
                                 <span>₹{deliveryCharge.toFixed(2)}</span>
                             </div>
+                            <div className="price-row">
+                                <span>Platform Fee (Paid to Superadmin)</span>
+                                <span>₹{PLATFORM_FEE_PRICE.toFixed(2)}</span>
+                            </div>
                             {taxAmount > 0 && (
                                 <div className="price-row">
-                                    <span>Tax (Paid to restaurant)</span>
+                                    <span>Tax (Paid to Superadmin)</span>
                                     <span>₹{taxAmount.toFixed(2)}</span>
                                 </div>
                             )}
@@ -470,7 +477,7 @@ const CheckoutPage = () => {
                 onButtonClick={() => {
                     setIsSuccessModalOpen(false);
                     clearCart();
-                    navigate('/dashboard');
+                    navigate(getDashboardPathForRole(user?.role));
                 }}
             />
 

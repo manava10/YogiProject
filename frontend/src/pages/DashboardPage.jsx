@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import Modal from '../components/Modal';
@@ -10,17 +10,27 @@ import Header from '../components/Header';
 import Rating from '../components/Rating';
 import OrderTrackingModal from '../components/OrderTrackingModal';
 import Chatbot from '../components/Chatbot';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import { OrderListSkeleton } from '../components/OrderCardSkeleton';
 import { DashboardWelcomeSkeleton } from '../components/DashboardSkeleton';
 import { EmptyOrders } from '../components/EmptyState';
 import './DashboardPage.css';
 import foodBackground from '../assets/images/food-background.jpg';
+import { io } from 'socket.io-client';
 
 const DashboardPage = () => {
     const { user, authToken } = useAuth();
     const { showError, showWarning, showSuccess } = useToast();
     const { addToCart, clearCart, cartItems } = useCart();
     const navigate = useNavigate();
+
+    useEffect(() => {
+        if (!user?.role) return;
+        const path = getDashboardPathForRole(user.role);
+        if (path !== '/dashboard') {
+            navigate(path, { replace: true });
+        }
+    }, [user, navigate]);
     const [orders, setOrders] = useState([]);
     const [loading, setLoading] = useState(true);
     const [selectedOrder, setSelectedOrder] = useState(null);
@@ -34,40 +44,77 @@ const DashboardPage = () => {
     const [dateFilter, setDateFilter] = useState('');
     const [currentPage, setCurrentPage] = useState(1);
     const [trackingOrder, setTrackingOrder] = useState(null);
+    const fetchOrdersRef = useRef(null);
+    const socketRef = useRef(null);
 
-    useEffect(() => {
-        const fetchOrders = async () => {
-            try {
-                setLoading(true);
-                const config = {
-                    headers: { Authorization: `Bearer ${authToken}` },
-                };
-                // Build query params with pagination and filters
-                const params = new URLSearchParams();
-                if (statusFilter) params.append('status', statusFilter);
-                if (dateFilter) {
-                    const [start, end] = dateFilter.split(' to ');
-                    if (start) params.append('startDate', start);
-                    if (end) params.append('endDate', end);
-                }
-                params.append('page', currentPage);
-                params.append('limit', 20); // Fetch 20 orders per page
-                
-                const queryString = params.toString();
-                const url = `${process.env.REACT_APP_API_URL}/api/orders/myorders${queryString ? '?' + queryString : ''}`;
-                const { data } = await axios.get(url, config);
-                setOrders(data.data || []);
-            } catch (error) {
-                console.error('Failed to fetch orders:', error);
-            } finally {
-                setLoading(false);
+    const fetchOrders = useCallback(async () => {
+        try {
+            setLoading(true);
+            const config = {
+                headers: { Authorization: `Bearer ${authToken}` },
+            };
+            // Build query params with pagination and filters
+            const params = new URLSearchParams();
+            if (statusFilter) params.append('status', statusFilter);
+            if (dateFilter) {
+                const [start, end] = dateFilter.split(' to ');
+                if (start) params.append('startDate', start);
+                if (end) params.append('endDate', end);
             }
-        };
+            params.append('page', currentPage);
+            params.append('limit', 20); // Fetch 20 orders per page
 
-        if (authToken) {
-            fetchOrders();
+            const queryString = params.toString();
+            const url = `${process.env.REACT_APP_API_URL}/api/orders/myorders${queryString ? '?' + queryString : ''}`;
+            const { data } = await axios.get(url, config);
+            setOrders(data.data || []);
+        } catch (error) {
+            console.error('Failed to fetch orders:', error);
+        } finally {
+            setLoading(false);
         }
     }, [authToken, statusFilter, dateFilter, currentPage]);
+
+    useEffect(() => {
+        if (!authToken) return;
+        fetchOrders();
+    }, [authToken, fetchOrders]);
+
+    useEffect(() => {
+        fetchOrdersRef.current = fetchOrders;
+    }, [fetchOrders]);
+
+    // Real-time updates for this user's orders
+    useEffect(() => {
+        if (!authToken) return;
+        if (socketRef.current) {
+            try {
+                socketRef.current.disconnect();
+            } catch (e) {
+                // ignore
+            }
+            socketRef.current = null;
+        }
+
+        const socket = io(process.env.REACT_APP_API_URL, {
+            auth: { token: authToken },
+            transports: ['websocket'],
+        });
+        socketRef.current = socket;
+
+        socket.on('order:updated', () => {
+            fetchOrdersRef.current();
+        });
+
+        return () => {
+            try {
+                socket.disconnect();
+            } catch (e) {
+                // ignore
+            }
+            socketRef.current = null;
+        };
+    }, [authToken]);
     
     const viewOrderDetails = (order) => setSelectedOrder(order);
     const closeOrderDetails = () => setSelectedOrder(null);
@@ -382,6 +429,16 @@ const DashboardPage = () => {
                                                     <span>Track Live Location</span>
                                                 </button>
                                             )}
+                                            {order.status === 'Cancelled' && order.cancelledDueToNoRider && (
+                                                <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3">
+                                                    <p className="text-sm font-semibold text-orange-700">
+                                                        Sorry! Rider not available
+                                                    </p>
+                                                    <p className="text-xs text-orange-700/80 mt-1">
+                                                        {order.systemCancelNote || 'We have cancelled your order due to rider unavailability.'}
+                                                    </p>
+                                                </div>
+                                            )}
                                             {order.status === 'Delivered' && !order.rating && (
                                                 <button 
                                                     className="bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-300 px-4 py-2 rounded-lg font-semibold text-sm min-h-[44px] transition-colors dark:bg-blue-900/20 dark:hover:bg-blue-900/30 dark:text-blue-400 dark:border-blue-800 flex items-center gap-2"
@@ -516,6 +573,14 @@ const DashboardPage = () => {
                             <strong>Total:</strong>
                             <strong>₹{selectedOrder.totalPrice.toFixed(2)}</strong>
                         </div>
+                        {selectedOrder.status === 'Cancelled' && selectedOrder.cancelledDueToNoRider && (
+                            <div className="mt-4 rounded-lg border border-orange-200 bg-orange-50 px-4 py-3">
+                                <p className="text-sm font-semibold text-orange-700">Order cancelled due to rider unavailability</p>
+                                <p className="text-xs text-orange-700/80 mt-1">
+                                    {selectedOrder.systemCancelNote || 'We have cancelled your order due to rider unavailability.'}
+                                </p>
+                            </div>
+                        )}
                     </div>
                 )}
             </Modal>

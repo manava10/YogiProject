@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import Header from '../components/Header';
 import { useAuth } from '../context/AuthContext';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import './AuthPage.css'; // Changed to shared CSS
 import foodBackground from '../assets/images/food-background.jpg';
 
@@ -22,14 +23,14 @@ const RegisterPage = () => {
     const [showPassword, setShowPassword] = useState(false);
     const [showConfirmPassword, setShowConfirmPassword] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
-    const { isLoggedIn } = useAuth();
+    const { isLoggedIn, user, setAuth } = useAuth();
     const navigate = useNavigate();
 
     useEffect(() => {
-        if (isLoggedIn) {
-            navigate('/dashboard');
+        if (isLoggedIn && user) {
+            navigate(getDashboardPathForRole(user.role), { replace: true });
         }
-    }, [isLoggedIn, navigate]);
+    }, [isLoggedIn, user, navigate]);
 
     const handleChange = (e) => {
         setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -63,9 +64,9 @@ const RegisterPage = () => {
         setIsLoading(true);
         try {
             const { data } = await axios.post(`${process.env.REACT_APP_API_URL}/api/auth/verify-otp`, { email: formData.email, otp });
-            
-            localStorage.setItem('authToken', data.token);
-            window.location.href = '/dashboard'; 
+
+            setAuth(data.token, data.user);
+            navigate(getDashboardPathForRole(data.user.role), { replace: true });
 
         } catch (err) {
             setError(err.response?.data?.msg || 'OTP verification failed');

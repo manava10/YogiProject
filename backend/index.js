@@ -2,10 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const dotenv = require('dotenv');
+const http = require('http');
+const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
+const User = require('./models/User');
 const connectDB = require('./config/db');
 const { errorHandler } = require('./middleware/errorHandler');
 const { generalLimiter } = require('./middleware/rateLimiter');
 const { sanitizeInput } = require('./middleware/sanitizer');
+const { processPendingRiderAssignments } = require('./utils/riderAssignment');
 // Load logger with error handling
 let logger;
 try {
@@ -52,6 +57,8 @@ const admin = require('./routes/admin');
 const settings = require('./routes/settings');
 const favorites = require('./routes/favorites');
 const credits = require('./routes/credits');
+const vendor = require('./routes/vendorRoutes');
+const chat = require('./routes/chat');
 
 const app = express();
 
@@ -110,6 +117,8 @@ app.use('/api/admin', admin);
 app.use('/api/settings', settings);
 app.use('/api/favorites', favorites);
 app.use('/api/credits', credits);
+app.use('/api/vendor', vendor);
+app.use('/api/chat', chat);
 
 // Health Check Route
 app.get('/health', (req, res) => {
@@ -125,6 +134,58 @@ app.get('/', (req, res) => {
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5001;
-const server = app.listen(PORT, () => {
+const server = http.createServer(app);
+
+// Attach Socket.IO for real-time order updates
+const io = new Server(server, {
+    cors: {
+        origin: function (origin, callback) {
+            // allow requests with no origin (like mobile apps or curl requests)
+            if (!origin) return callback(null, true);
+            if (allowedOrigins.indexOf(origin) === -1) {
+                return callback(null, false);
+            }
+            return callback(null, true);
+        },
+        credentials: true,
+    },
+});
+
+// Make IO available to controllers via req.app.get('io')
+app.set('io', io);
+// Make IO available to background workers
+global.__ioRef = io;
+
+io.use(async (socket, next) => {
+    try {
+        const token = socket.handshake?.auth?.token || socket.handshake?.query?.token;
+        if (!token) return next(new Error('Unauthorized'));
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id);
+        if (!user) return next(new Error('Unauthorized'));
+
+        socket.userId = user._id.toString();
+        return next();
+    } catch (err) {
+        return next(new Error('Unauthorized'));
+    }
+});
+
+io.on('connection', (socket) => {
+    // Each customer joins their own room, so we can push order updates directly.
+    socket.join(`user:${socket.userId}`);
+});
+
+server.listen(PORT, () => {
     logger.info(`Server is running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
 });
+
+// Background worker:
+// - Retry pending rider assignment every 1 minute
+// - Auto-cancel if still no rider after 30 minutes
+setInterval(() => {
+    processPendingRiderAssignments().catch((e) => {
+        logger.error('Pending rider assignment worker failed:', { error: e.message, stack: e.stack });
+    });
+}, 60 * 1000);

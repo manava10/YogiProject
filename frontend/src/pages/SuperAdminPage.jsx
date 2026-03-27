@@ -283,7 +283,7 @@ const SuperAdminPage = () => {
                         {/* Live Order Management Section */}
                         <div className="admin-management-card mt-8">
                             <h2 className="card-title">Live Order Management</h2>
-                            <OrderManager orders={orders} setOrders={setOrders} loading={loading} canAssignRider={true} />
+                            <OrderManager orders={orders} setOrders={setOrders} loading={loading} />
                         </div>
 
                         {/* Recent Orders List */}

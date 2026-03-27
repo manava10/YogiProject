@@ -10,6 +10,10 @@ const MenuSchema = new mongoose.Schema({
             type: String,
             required: true,
         },
+        description: {
+            type: String,
+            trim: true,
+        },
         price: {
             type: Number,
             required: true,
@@ -57,6 +61,24 @@ const RestaurantSchema = new mongoose.Schema({
         type: String,
         enum: ['restaurant', 'fruit_stall'],
         default: 'restaurant',
+    },
+    owner: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        // Make it required later once old data is gone, or since they are starting fresh, we can require it
+        required: true,
+    },
+    location: {
+        type: {
+            type: String,
+            enum: ['Point'],
+            default: 'Point'
+        },
+        coordinates: {
+            type: [Number],
+            index: '2dsphere',
+            default: [0, 0] // [longitude, latitude]
+        }
     }
 }, {
     timestamps: true,
@@ -71,5 +93,6 @@ RestaurantSchema.index({ type: 1 });
 RestaurantSchema.index({ createdAt: -1 }); // Index for sorting by creation date
 RestaurantSchema.index({ isAcceptingOrders: 1, type: 1 }); // Compound index for filtering open restaurants
 RestaurantSchema.index({ type: 1, createdAt: -1 }); // Compound index for type + sort queries
+RestaurantSchema.index({ location: '2dsphere' }); // GeoSpatial Index for map queries
 
 module.exports = mongoose.model('Restaurant', RestaurantSchema);

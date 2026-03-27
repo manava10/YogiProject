@@ -1,35 +1,31 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useEffect, useCallback, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
-import L from 'leaflet';
+import { GoogleMap, Marker, useJsApiLoader } from '@react-google-maps/api';
 import { useAuth } from '../context/AuthContext';
-import 'leaflet/dist/leaflet.css';
 
-// Fix default marker icon in react-leaflet
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-    iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
-    iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
-    shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-});
-
-const TRACKING_POLL_MS = 5000;
-
-const MapUpdater = ({ center }) => {
-    const map = useMap();
-    useEffect(() => {
-        if (center && center.lat && center.lng) {
-            map.setView([center.lat, center.lng], map.getZoom());
-        }
-    }, [center, map]);
-    return null;
-};
+const TRACKING_POLL_MS = 60 * 1000; // match 1 minute rider location updates
 
 const OrderTrackingModal = ({ show, onClose, order }) => {
     const { authToken } = useAuth();
     const [trackingData, setTrackingData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [etaSeconds, setEtaSeconds] = useState(null);
+    const [etaFetchedAt, setEtaFetchedAt] = useState(null);
+
+    const { isLoaded: isGoogleLoaded, loadError } = useJsApiLoader({
+        googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
+        libraries: [],
+    });
+
+    const mapRef = useRef(null);
+
+    const formatETA = useCallback((seconds) => {
+        if (typeof seconds !== 'number' || Number.isNaN(seconds) || seconds < 0) return null;
+        const mins = Math.max(0, Math.floor(seconds / 60));
+        const secs = Math.max(0, seconds % 60);
+        return { mins, secs };
+    }, []);
 
     const fetchTracking = useCallback(async () => {
         if (!order?._id || !authToken) return;
@@ -40,6 +36,8 @@ const OrderTrackingModal = ({ show, onClose, order }) => {
             );
             if (data.success) {
                 setTrackingData(data.data);
+                setEtaSeconds(typeof data.data?.etaSeconds === 'number' ? data.data.etaSeconds : null);
+                setEtaFetchedAt(new Date());
                 setError(null);
             }
         } catch (err) {
@@ -49,6 +47,20 @@ const OrderTrackingModal = ({ show, onClose, order }) => {
         }
     }, [order?._id, authToken]);
 
+    // Live ETA countdown between polls
+    useEffect(() => {
+        if (!show) return;
+        if (typeof etaSeconds !== 'number' || !etaFetchedAt) return;
+
+        const id = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - etaFetchedAt.getTime()) / 1000);
+            const next = Math.max(0, Math.round(etaSeconds - elapsed));
+            setEtaSeconds(next);
+        }, 1000);
+
+        return () => clearInterval(id);
+    }, [show, etaSeconds, etaFetchedAt]);
+
     useEffect(() => {
         if (!show || !order) return;
         setLoading(true);
@@ -57,11 +69,21 @@ const OrderTrackingModal = ({ show, onClose, order }) => {
         return () => clearInterval(interval);
     }, [show, order, fetchTracking]);
 
-    if (!show) return null;
-
     const riderLoc = trackingData?.riderLocation;
     const hasLocation = riderLoc && typeof riderLoc.lat === 'number' && typeof riderLoc.lng === 'number';
-    const center = hasLocation ? [riderLoc.lat, riderLoc.lng] : [20.5937, 78.9629]; // Default: India center
+    const center = useMemo(() => {
+        if (hasLocation) return { lat: riderLoc.lat, lng: riderLoc.lng };
+        return { lat: 20.5937, lng: 78.9629 }; // Default: India center
+    }, [hasLocation, riderLoc?.lat, riderLoc?.lng]);
+
+    const etaParts = formatETA(etaSeconds);
+    const etaArrivalTime = useMemo(() => {
+        if (!etaParts) return null;
+        const ms = Date.now() + (etaSeconds || 0) * 1000;
+        return new Date(ms);
+    }, [etaParts, etaSeconds]);
+
+    if (!show) return null;
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -93,24 +115,58 @@ const OrderTrackingModal = ({ show, onClose, order }) => {
                                     )}
                                 </p>
                             )}
+
+                            <div className="mb-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 px-4 py-3">
+                                <p className="text-sm font-semibold text-gray-900 dark:text-gray-100">ETA (Live)</p>
+                                {etaParts ? (
+                                    <>
+                                        <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">
+                                            ~{Math.max(1, etaParts.mins)} min {etaParts.secs}s
+                                        </p>
+                                        {etaArrivalTime && (
+                                            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                                Expected by: {etaArrivalTime.toLocaleTimeString()}
+                                            </p>
+                                        )}
+                                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                                            Updates every ~1 minute based on rider’s live location.
+                                        </p>
+                                    </>
+                                ) : (
+                                    <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">
+                                        Calculating ETA…
+                                    </p>
+                                )}
+                            </div>
+
                             {hasLocation ? (
                                 <>
                                     <div className="h-80 rounded-lg overflow-hidden border border-gray-200 dark:border-gray-600">
-                                        <MapContainer
-                                            center={center}
-                                            zoom={15}
-                                            className="h-full w-full"
-                                            scrollWheelZoom={true}
-                                        >
-                                            <TileLayer
-                                                attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-                                                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                                            />
-                                            <Marker position={center}>
-                                                <Popup>Rider&apos;s current location</Popup>
-                                            </Marker>
-                                            <MapUpdater center={riderLoc} />
-                                        </MapContainer>
+                                        {loadError ? (
+                                            <div className="h-full w-full flex items-center justify-center text-red-600 dark:text-red-400 text-sm">
+                                                Failed to load Google Maps.
+                                            </div>
+                                        ) : !isGoogleLoaded ? (
+                                            <div className="h-full w-full flex items-center justify-center text-gray-600 dark:text-gray-400 text-sm">
+                                                Loading Google Maps…
+                                            </div>
+                                        ) : (
+                                            <GoogleMap
+                                                onLoad={(map) => {
+                                                    mapRef.current = map;
+                                                }}
+                                                center={center}
+                                                zoom={15}
+                                                mapContainerStyle={{ width: '100%', height: '100%' }}
+                                                options={{
+                                                    streetViewControl: false,
+                                                    fullscreenControl: false,
+                                                    mapTypeControl: false,
+                                                }}
+                                            >
+                                                <Marker position={center} />
+                                            </GoogleMap>
+                                        )}
                                     </div>
                                     <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                                         Last updated: {riderLoc?.updatedAt ? new Date(riderLoc.updatedAt).toLocaleTimeString() : '—'}

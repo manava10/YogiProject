@@ -2,122 +2,159 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 
-const UPDATE_INTERVAL_MS = 10000; // 10 seconds
+const UPDATE_INTERVAL_MS = 60 * 1000; // 1 minute
 
 const RiderLocationSharer = ({ orders }) => {
     const { authToken } = useAuth();
+    const intervalRef = useRef(null);
+
+    const activeOrders = (orders || []).filter(o => o.status === 'Out for Delivery');
+    const hasActiveOrders = activeOrders.length > 0;
+
+    const [deliveryEnabled, setDeliveryEnabled] = useState(false);
     const [isSharing, setIsSharing] = useState(false);
     const [error, setError] = useState(null);
     const [lastUpdated, setLastUpdated] = useState(null);
-    const intervalRef = useRef(null);
 
-    const activeOrders = orders.filter(o => o.status === 'Out for Delivery');
+    useEffect(() => {
+        const fetchMe = async () => {
+            if (!authToken) return;
+            try {
+                const { data } = await axios.get(`${process.env.REACT_APP_API_URL}/api/auth/me`, {
+                    headers: { Authorization: `Bearer ${authToken}` },
+                });
+                setDeliveryEnabled(!!data?.data?.deliveryAvailability);
+            } catch (e) {
+                setDeliveryEnabled(false);
+            }
+        };
+        fetchMe();
+    }, [authToken]);
 
-    const sendLocation = useCallback(() => {
-        if (!navigator.geolocation) {
-            setError('Geolocation is not supported by your browser.');
+    const getCurrentCoords = useCallback(() => {
+        return new Promise((resolve, reject) => {
+            if (!navigator.geolocation) {
+                return reject(new Error('Geolocation is not supported by your browser.'));
+            }
+
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const { latitude, longitude } = pos.coords;
+                    resolve({ lat: latitude, lng: longitude });
+                },
+                (err) => reject(err),
+                { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+            );
+        });
+    }, []);
+
+    const tick = useCallback(async () => {
+        if (!deliveryEnabled) return;
+        try {
+            const coords = await getCurrentCoords();
+            const config = {
+                headers: { Authorization: `Bearer ${authToken}` },
+            };
+
+            // 1) Always update global rider location (idle + busy)
+            await axios.put(`${process.env.REACT_APP_API_URL}/api/admin/rider/location`, coords, config);
+
+            // 2) If rider has active deliveries, update order tracking location too
+            if (activeOrders.length > 0) {
+                await Promise.all(
+                    activeOrders.map((order) =>
+                        axios.put(`${process.env.REACT_APP_API_URL}/api/admin/orders/${order._id}/location`, coords, config)
+                    )
+                );
+            }
+
+            setLastUpdated(new Date());
+            setError(null);
+        } catch (err) {
+            setError(err.response?.data?.msg || err.message || 'Failed to update location');
+        }
+    }, [deliveryEnabled, authToken, activeOrders, getCurrentCoords]);
+
+    useEffect(() => {
+        // Start/stop interval based on deliveryEnabled
+        if (!authToken) return;
+
+        if (!deliveryEnabled) {
+            if (intervalRef.current) clearInterval(intervalRef.current);
+            intervalRef.current = null;
+            setIsSharing(false);
             return;
         }
 
-        navigator.geolocation.getCurrentPosition(
-            (pos) => {
-                const { latitude, longitude } = pos.coords;
-                const config = {
-                    headers: { Authorization: `Bearer ${authToken}` },
-                };
-                const payload = { lat: latitude, lng: longitude };
-
-                activeOrders.forEach((order) => {
-                    axios
-                        .put(
-                            `${process.env.REACT_APP_API_URL}/api/admin/orders/${order._id}/location`,
-                            payload,
-                            config
-                        )
-                        .then(() => {
-                            setLastUpdated(new Date());
-                            setError(null);
-                        })
-                        .catch((err) => {
-                            console.warn('Location update failed for order', order._id, err);
-                            setError(err.response?.data?.msg || 'Failed to update location');
-                        });
-                });
-            },
-            (err) => {
-                setError(err.message || 'Could not get location. Please allow location access.');
-            },
-            { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
-        );
-    }, [activeOrders, authToken]);
-
-    const startSharing = () => {
-        if (activeOrders.length === 0) return;
         setError(null);
-        sendLocation();
         setIsSharing(true);
-        intervalRef.current = setInterval(sendLocation, UPDATE_INTERVAL_MS);
-    };
+        tick();
 
-    const stopSharing = () => {
-        if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-        }
-        setIsSharing(false);
-    };
+        intervalRef.current = setInterval(tick, UPDATE_INTERVAL_MS);
 
-    useEffect(() => {
         return () => {
             if (intervalRef.current) clearInterval(intervalRef.current);
+            intervalRef.current = null;
+            setIsSharing(false);
         };
-    }, []);
+    }, [deliveryEnabled, authToken, tick]);
 
-    const hasActiveOrders = activeOrders.length > 0;
+    const toggleDelivery = async () => {
+        if (!authToken) return;
+        const next = !deliveryEnabled;
+        setError(null);
+        try {
+            await axios.put(
+                `${process.env.REACT_APP_API_URL}/api/admin/rider/availability`,
+                { enabled: next },
+                { headers: { Authorization: `Bearer ${authToken}` } }
+            );
+            setDeliveryEnabled(next);
+        } catch (err) {
+            setError(err.response?.data?.msg || err.message || 'Failed to update availability');
+        }
+    };
 
     return (
         <div className="rider-location-card">
             <div className="rider-location-header">
                 <span className="rider-location-icon">📍</span>
-                <h3 className="rider-location-title">Share Your Location</h3>
+                <h3 className="rider-location-title">Rider Delivery Status</h3>
             </div>
+
             <p className="rider-location-desc">
-                {hasActiveOrders
-                    ? 'Customers can track your live location when delivering. Click below to start sharing.'
-                    : 'When you have orders marked "Out for Delivery", you can share your location so customers can track you in real time.'}
+                Status: <strong>{hasActiveOrders ? 'Busy (Out for Delivery)' : 'Idle (No active Out for Delivery)'}</strong>
+                {' '}• Sharing: <strong>{deliveryEnabled ? 'ON' : 'OFF'}</strong>
             </p>
-            {!hasActiveOrders && (
-                <p className="rider-location-hint">
-                    Share location is available when you have orders with status &quot;Out for Delivery&quot;. Ask your admin to assign you and update the order status.
-                </p>
-            )}
+
+            <p className="rider-location-hint">
+                {deliveryEnabled
+                    ? 'Your location will be updated every 1 minute for nearest-rider matching and live tracking.'
+                    : 'Turn ON to allow the system to assign you orders when you are idle.'}
+            </p>
+
             {error && <p className="rider-location-error">{error}</p>}
-            {isSharing ? (
-                <div className="rider-location-status">
+
+            <div style={{ marginTop: 12 }}>
+                <button
+                    type="button"
+                    className="rider-location-start-btn"
+                    onClick={toggleDelivery}
+                >
+                    {deliveryEnabled ? 'Disable Delivery' : 'Enable Delivery'}
+                </button>
+            </div>
+
+            {isSharing && (
+                <div className="rider-location-status" style={{ marginTop: 14 }}>
                     <span className="rider-location-dot" />
-                    <span>Sharing location every 10 seconds</span>
+                    <span>Updating location every 1 minute</span>
                     {lastUpdated && (
                         <span className="rider-location-time">
                             Last sent: {lastUpdated.toLocaleTimeString()}
                         </span>
                     )}
-                    <button
-                        type="button"
-                        className="rider-location-stop-btn"
-                        onClick={stopSharing}
-                    >
-                        Stop Sharing
-                    </button>
                 </div>
-            ) : (
-                <button
-                    type="button"
-                    className="rider-location-start-btn"
-                    onClick={startSharing}
-                    disabled={!hasActiveOrders}
-                >
-                    {hasActiveOrders ? 'Start Sharing Location' : 'No orders out for delivery'}
-                </button>
             )}
         </div>
     );

@@ -52,7 +52,7 @@ const UserSchema = new mongoose.Schema({
     },
     role: {
         type: String,
-        enum: ['user', 'rider', 'deliveryadmin', 'admin'],
+        enum: ['user', 'rider', 'vendor', 'deliveryadmin', 'admin'],
         default: 'user',
     },
     resetPasswordToken: String,
@@ -62,6 +62,23 @@ const UserSchema = new mongoose.Schema({
         ref: 'Restaurant'
     }],
     credits: {
+        type: Number,
+        default: 0,
+        min: 0,
+    },
+    // Riders: opt-in switch for delivery availability (used for nearest idle rider).
+    deliveryAvailability: {
+        type: Boolean,
+        default: false,
+    },
+    // Riders: last known location (updated by rider when deliveryAvailability is ON).
+    riderLocation: {
+        lat: { type: Number },
+        lng: { type: Number },
+        updatedAt: { type: Date },
+    },
+    // Riders: total delivery earnings (delivery charge only).
+    earnings: {
         type: Number,
         default: 0,
         min: 0,

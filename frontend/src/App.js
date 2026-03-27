@@ -9,6 +9,8 @@ import DashboardPage from './pages/DashboardPage';
 import CheckoutPage from './pages/CheckoutPage';
 import ForgotPasswordPage from './pages/ForgotPasswordPage';
 import ResetPasswordPage from './pages/ResetPasswordPage';
+import VendorAuthPage from './pages/VendorAuthPage';
+import VendorDashboardPage from './pages/VendorDashboardPage';
 import ProtectedRoute from './ProtectedRoute';
 import AdminRoute from './AdminRoute';
 import Cart from './components/Cart';
@@ -51,6 +53,7 @@ function AppContent() {
         <Route path="/restaurants" element={<RestaurantPage />} />
         <Route path="/fruits" element={<FruitPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/resregister" element={<VendorAuthPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/resetpassword/:resettoken" element={<ResetPasswordPage />} />
@@ -97,6 +100,14 @@ function AppContent() {
               <Suspense fallback={<PageLoader />}>
                 <SuperAdminPage />
               </Suspense>
+            </AdminRoute>
+          } 
+        />
+        <Route 
+          path="/vendordashboard"
+          element={
+            <AdminRoute roles={['vendor', 'admin']}>
+              <VendorDashboardPage />
             </AdminRoute>
           } 
         />

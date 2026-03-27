@@ -3,10 +3,11 @@ import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { useNavigate } from 'react-router-dom';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import './UserProfile.css';
 
 const UserProfile = ({ isOpen, onClose }) => {
-    const { authToken } = useAuth();
+    const { authToken, user: authUser } = useAuth();
     const { showSuccess, showError: showErrorToast } = useToast();
     const navigate = useNavigate();
     const [userDetails, setUserDetails] = useState(null);
@@ -318,7 +319,7 @@ const UserProfile = ({ isOpen, onClose }) => {
                                 className="profile-action-btn primary"
                                 onClick={() => {
                                     onClose();
-                                    navigate('/dashboard');
+                                    navigate(getDashboardPathForRole(authUser?.role));
                                 }}
                             >
                                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

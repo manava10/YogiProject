@@ -124,7 +124,7 @@ exports.toggleAcceptingOrders = async (req, res) => {
 // @access  Private (Admin)
 exports.addMenuItem = async (req, res) => {
     try {
-        const { category, name, price, emoji, imageUrl } = req.body;
+        const { category, name, price, emoji, imageUrl, description } = req.body;
         const { restaurantId } = req.params;
 
         const restaurant = await Restaurant.findById(restaurantId);
@@ -138,12 +138,12 @@ exports.addMenuItem = async (req, res) => {
 
         if (menuCategory) {
             // Add item to existing category
-            menuCategory.items.push({ name, price, emoji, imageUrl });
+            menuCategory.items.push({ name, price, emoji, imageUrl, description });
         } else {
             // Create new category and add item
             restaurant.menu.push({
                 category,
-                items: [{ name, price, emoji, imageUrl }]
+                items: [{ name, price, emoji, imageUrl, description }]
             });
         }
 

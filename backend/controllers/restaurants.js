@@ -79,3 +79,53 @@ exports.getRestaurant = async (req, res, next) => {
         res.status(500).json({ success: false, msg: 'Server error' });
     }
 };
+
+// @desc    Get restaurants within a radius from a specific point
+// @route   GET /api/restaurants/nearby
+// @access  Public
+exports.getNearbyRestaurants = async (req, res, next) => {
+    try {
+        const { lng, lat, maxDistance = 50000, type } = req.query; // default 50km
+
+        if (!lng || !lat) {
+            return res.status(400).json({ success: false, msg: 'Please provide longitude and latitude' });
+        }
+
+        let matchStage = {};
+        if (type === 'fruit_stall') {
+            matchStage.type = 'fruit_stall';
+        } else if (type === 'restaurant') {
+            matchStage.type = 'restaurant';
+        }
+
+        const restaurants = await Restaurant.aggregate([
+            {
+                $geoNear: {
+                    near: {
+                        type: 'Point',
+                        coordinates: [parseFloat(lng), parseFloat(lat)]
+                    },
+                    distanceField: 'distance',
+                    maxDistance: parseInt(maxDistance), // in meters
+                    spherical: true,
+                    query: matchStage,
+                    key: 'location'
+                }
+            },
+            {
+                $project: {
+                    menu: 0 // Do not send huge menu arrays
+                }
+            }
+        ]);
+
+        res.status(200).json({
+            success: true,
+            count: restaurants.length,
+            data: restaurants,
+        });
+    } catch (error) {
+        logger.error('Get nearby restaurants error:', { error: error.message });
+        res.status(500).json({ success: false, msg: 'Server error' });
+    }
+};

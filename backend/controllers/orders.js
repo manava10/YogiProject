@@ -4,6 +4,11 @@ const Restaurant = require('../models/Restaurant');
 const User = require('../models/User');
 const PDFDocument = require('pdfkit');
 const logger = require('../utils/logger');
+const {
+    geocodeAddress,
+    getDrivingDistanceMetersFromOriginsToDestination,
+    getDrivingDistanceAndDurationFromOriginsToDestination,
+} = require('../utils/googleMaps');
 
 // @desc    Create new order
 // @route   POST /api/orders
@@ -143,14 +148,65 @@ exports.createOrder = async (req, res) => {
         // ==========================================
         // SECURITY: Calculate shipping on server
         // ==========================================
-        let calculatedShippingPrice = 50; // Default for restaurants
+        const round2 = (n) => Math.round((n || 0) * 100) / 100;
 
-        if (isFruitStall) {
-            // Fruit stall delivery logic
-            if (calculatedItemsPrice < 500) {
-                calculatedShippingPrice = 30;
+        const platformFeePrice = 12; // fixed per order
+
+        // Delivery pricing (driving distance): 30 + 7 per km
+        // Uses Google driving distance (meters -> km).
+        let calculatedShippingPrice = 0;
+        let deliveryDistanceMeters = null;
+        let deliveryDistanceKm = null;
+        let deliveryDurationSeconds = null;
+        let customerLocation = null;
+
+        const [restaurantLng, restaurantLat] = restaurantDoc.location?.coordinates || [0, 0];
+        const originCoords = { lat: restaurantLat, lng: restaurantLng };
+
+        try {
+            const destCoords = await geocodeAddress(shippingAddress.trim());
+            customerLocation = destCoords;
+            const results = await getDrivingDistanceAndDurationFromOriginsToDestination(
+                [originCoords],
+                destCoords
+            );
+            deliveryDistanceMeters = results?.[0]?.meters;
+            deliveryDurationSeconds = results?.[0]?.seconds;
+
+            if (typeof deliveryDistanceMeters === 'number') {
+                deliveryDistanceKm = round2(deliveryDistanceMeters / 1000);
+                calculatedShippingPrice = round2(30 + 7 * deliveryDistanceKm);
             } else {
-                calculatedShippingPrice = 50;
+                throw new Error('Distance Matrix returned empty distance value');
+            }
+        } catch (e) {
+            // Fallback: straight-line distance (keeps ordering usable if Google APIs fail)
+            try {
+                const destCoords = await geocodeAddress(shippingAddress.trim());
+                const { lat: lat2, lng: lng2 } = destCoords;
+                customerLocation = { lat: lat2, lng: lng2 };
+                const lat1 = originCoords.lat;
+                const lng1 = originCoords.lng;
+                const R = 6371; // km
+                const dLat = ((lat2 - lat1) * Math.PI) / 180;
+                const dLng = ((lng2 - lng1) * Math.PI) / 180;
+                const a =
+                    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                    Math.cos((lat1 * Math.PI) / 180) *
+                        Math.cos((lat2 * Math.PI) / 180) *
+                        Math.sin(dLng / 2) *
+                        Math.sin(dLng / 2);
+                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                const km = R * c;
+                deliveryDistanceKm = round2(km);
+                deliveryDistanceMeters = deliveryDistanceKm * 1000;
+                calculatedShippingPrice = round2(30 + 7 * deliveryDistanceKm);
+                // fallback ETA: assume average 30km/h (~500m per min)
+                deliveryDurationSeconds = Math.max(0, Math.round((km / 30) * 3600));
+                logger.warn('Google driving distance failed, used fallback distance', { err: e.message, orderUserId: req.user.id });
+            } catch (e2) {
+                logger.error('Failed to geocode shipping address for delivery pricing', { error: e2.message });
+                return res.status(400).json({ msg: 'Unable to calculate delivery price for the given address.' });
             }
         }
 
@@ -204,7 +260,9 @@ exports.createOrder = async (req, res) => {
             const userCredits = user.credits || 0;
 
             // Validate credits usage
-            const maxCreditsAllowed = Math.floor((calculatedItemsPrice + calculatedTaxPrice + calculatedShippingPrice - calculatedDiscount) * 0.05); // Max 5% of order value
+            const maxCreditsAllowed = Math.floor(
+                (calculatedItemsPrice + calculatedTaxPrice + calculatedShippingPrice + platformFeePrice - calculatedDiscount) * 0.05
+            ); // Max 5% of order value (before credits)
             const requestedCredits = Math.floor(frontendCreditsUsed);
 
             // Use minimum of: requested credits, user's available credits, max allowed (5%)
@@ -231,8 +289,9 @@ exports.createOrder = async (req, res) => {
         // ==========================================
         // SECURITY: Calculate final total on server (after credits)
         // ==========================================
-        const calculatedTotalPrice = calculatedItemsPrice + calculatedTaxPrice + calculatedShippingPrice - calculatedDiscount - creditsToUse;
-        const finalTotalPrice = Math.max(0, Math.round(calculatedTotalPrice * 100) / 100); // Ensure non-negative
+        const foodPayablePrice = round2(calculatedItemsPrice - calculatedDiscount - creditsToUse); // coupon/credits affect food only
+        const calculatedTotalPrice = foodPayablePrice + calculatedTaxPrice + calculatedShippingPrice + platformFeePrice;
+        const finalTotalPrice = Math.max(0, round2(calculatedTotalPrice)); // Ensure non-negative
 
         // Log any significant discrepancies (potential manipulation attempts)
         const priceDifference = Math.abs(finalTotalPrice - (frontendTotalPrice || 0));
@@ -253,15 +312,47 @@ exports.createOrder = async (req, res) => {
             restaurant,
             items: verifiedItems,           // Server-verified items with DB prices
             shippingAddress: shippingAddress.trim(),
+            customerLocation,
             itemsPrice: calculatedItemsPrice,    // Server-calculated
             taxPrice: calculatedTaxPrice,        // Server-calculated
-            shippingPrice: calculatedShippingPrice, // Server-calculated
+            shippingPrice: calculatedShippingPrice, // Server-calculated (delivery charge)
             totalPrice: finalTotalPrice,         // Server-calculated
             couponUsed: validatedCouponCode,      // Server-validated coupon code
-            creditsUsed: creditsToUse             // Server-validated credits
+            creditsUsed: creditsToUse,            // Server-validated credits
+            couponDiscountPrice: calculatedDiscount,
+            foodPayablePrice,
+            platformFeePrice,
+            riderEarning: calculatedShippingPrice,
+            superadminEarning: calculatedTaxPrice + platformFeePrice,
+            deliveryDistanceMeters,
+            deliveryDistanceKm,
+            deliveryDurationSeconds,
         });
 
         const createdOrder = await order.save();
+
+        // Real-time update: notify the customer dashboard
+        try {
+            const io = req.app.get('io');
+            if (io) {
+                const userId = req.user?._id ? req.user._id.toString() : req.user.id;
+                io.to(`user:${userId}`).emit('order:updated', {
+                    orderId: createdOrder._id.toString(),
+                    status: createdOrder.status,
+                });
+
+                // Also notify the restaurant owner (vendor dashboard)
+                const restaurantOwnerId = restaurantDoc?.owner ? restaurantDoc.owner.toString() : null;
+                if (restaurantOwnerId) {
+                    io.to(`user:${restaurantOwnerId}`).emit('order:updated', {
+                        orderId: createdOrder._id.toString(),
+                        status: createdOrder.status,
+                    });
+                }
+            }
+        } catch (e) {
+            // Don't block order creation if websocket emission fails
+        }
 
         // Deduct credits from user account if used
         if (creditsToUse > 0) {
@@ -438,7 +529,37 @@ exports.cancelOrder = async (req, res) => {
         }
 
         order.status = 'Cancelled';
+        order.pendingRiderAssignment = false;
+        order.pendingRiderAssignmentRetryAt = undefined;
+        order.pendingRiderAssignmentStartedAt = undefined;
         const updatedOrder = await order.save();
+
+        // Real-time update: notify the customer dashboard
+        try {
+            const io = req.app.get('io');
+            if (io) {
+                io.to(`user:${updatedOrder.user.toString()}`).emit('order:updated', {
+                    orderId: updatedOrder._id.toString(),
+                    status: updatedOrder.status,
+                });
+
+                // Also notify restaurant owner (if any)
+                try {
+                    const restaurantDoc = await Restaurant.findById(updatedOrder.restaurant).select('owner');
+                    const restaurantOwnerId = restaurantDoc?.owner ? restaurantDoc.owner.toString() : null;
+                    if (restaurantOwnerId) {
+                        io.to(`user:${restaurantOwnerId}`).emit('order:updated', {
+                            orderId: updatedOrder._id.toString(),
+                            status: updatedOrder.status,
+                        });
+                    }
+                } catch (e) {
+                    // ignore
+                }
+            }
+        } catch (e) {
+            // ignore
+        }
 
         logger.info(`Order ${req.params.id} cancelled by user ${req.user.id}`);
         res.json(updatedOrder);
@@ -554,7 +675,7 @@ exports.getOrderTracking = async (req, res) => {
         const order = await Order.findById(req.params.id)
             .populate('assignedRider', 'name contactNumber')
             .populate('user', '_id')
-            .select('user status riderLocation assignedRider shippingAddress');
+            .select('user status riderLocation assignedRider shippingAddress etaSeconds customerLocation');
 
         if (!order) {
             return res.status(404).json({ success: false, msg: 'Order not found' });
@@ -569,6 +690,37 @@ exports.getOrderTracking = async (req, res) => {
             return res.status(400).json({ success: false, msg: 'Order is not out for delivery yet' });
         }
 
+        let etaSeconds = order.etaSeconds || null;
+
+        // Recalculate ETA from rider -> customer during tracking (latest riderLocation -> customerLocation).
+        try {
+            const riderLoc = order.riderLocation;
+            const dest = order.customerLocation;
+            const riderLat = riderLoc?.lat;
+            const riderLng = riderLoc?.lng;
+            const destLat = dest?.lat;
+            const destLng = dest?.lng;
+
+            if (
+                order.status === 'Out for Delivery' &&
+                typeof riderLat === 'number' &&
+                typeof riderLng === 'number' &&
+                typeof destLat === 'number' &&
+                typeof destLng === 'number'
+            ) {
+                const results = await getDrivingDistanceAndDurationFromOriginsToDestination(
+                    [{ lat: riderLat, lng: riderLng }],
+                    { lat: destLat, lng: destLng }
+                );
+                const seconds = results?.[0]?.seconds;
+                if (typeof seconds === 'number' && seconds >= 0) {
+                    etaSeconds = seconds;
+                }
+            }
+        } catch (e) {
+            // If Google ETA fails, keep the stored etaSeconds.
+        }
+
         res.json({
             success: true,
             data: {
@@ -577,7 +729,8 @@ exports.getOrderTracking = async (req, res) => {
                     name: order.assignedRider.name,
                     contactNumber: order.assignedRider.contactNumber
                 } : null,
-                status: order.status
+                status: order.status,
+                etaSeconds: etaSeconds || null,
             }
         });
     } catch (error) {

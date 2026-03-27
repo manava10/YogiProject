@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import Header from '../components/Header';
 import axios from 'axios';
 import './AuthPage.css'; // Changed to shared CSS
@@ -17,17 +18,17 @@ const LoginPage = () => {
     const [errors, setErrors] = useState({});
     const [showPassword, setShowPassword] = useState(false);
     const navigate = useNavigate();
-    const { login, isLoggedIn, setAuth } = useAuth();
+    const { login, isLoggedIn, user, setAuth } = useAuth();
     const { showError, showSuccess } = useToast();
     const location = useLocation();
     const [successMessage, setSuccessMessage] = useState('');
     const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
     useEffect(() => {
-        if (isLoggedIn) {
-            navigate('/dashboard');
+        if (isLoggedIn && user) {
+            navigate(getDashboardPathForRole(user.role), { replace: true });
         }
-    }, [isLoggedIn, navigate]);
+    }, [isLoggedIn, user, navigate]);
 
     useEffect(() => {
         if (location.state && location.state.message) {
@@ -73,8 +74,8 @@ const LoginPage = () => {
         if (Object.keys(newErrors).length === 0) {
             try {
                 // Use the login function from AuthContext
-                await login(formData.email, formData.password);
-                navigate('/dashboard');
+                const data = await login(formData.email, formData.password);
+                navigate(getDashboardPathForRole(data.user.role), { replace: true });
             } catch (error) {
                 const errorMsg = (error.response && error.response.data && error.response.data.msg) || 'Login failed. Please check credentials.';
                 setErrors({ ...newErrors, form: errorMsg });
@@ -98,7 +99,7 @@ const LoginPage = () => {
                 localStorage.setItem('authToken', data.token);
                 setAuth(data.token, data.user);
                 showSuccess(data.isNewUser ? 'Welcome to FoodFreaky! 🎉' : 'Welcome back!');
-                navigate('/dashboard');
+                navigate(getDashboardPathForRole(data.user.role), { replace: true });
             }
         } catch (error) {
             console.error('Google login error:', error);

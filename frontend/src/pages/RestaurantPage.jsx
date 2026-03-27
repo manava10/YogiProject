@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useCart } from '../context/CartContext';
 import { useAuth } from '../context/AuthContext';
@@ -9,67 +9,12 @@ import { useNavigate } from 'react-router-dom';
 import Modal from '../components/Modal';
 import Header from '../components/Header';
 import Rating from '../components/Rating'; // Import the Rating component
+import { MapPin } from 'lucide-react';
 import { RestaurantListSkeleton } from '../components/RestaurantCardSkeleton';
 import { SkeletonBox } from '../components/Skeleton';
 import { EmptyRestaurants, EmptyMenuItems } from '../components/EmptyState';
 import './RestaurantPage.css';
 import foodBackground from '../assets/images/food-background.jpg';
-
-const CountdownTimer = ({ closingTime }) => {
-    const calculateTimeLeft = () => {
-        const [hours, minutes] = closingTime.split(':');
-        const now = new Date();
-        const deadline = new Date();
-        deadline.setHours(hours, minutes, 0, 0);
-
-        if (now > deadline) {
-            // If past closing time, maybe show "Closed" or calculate for next day
-            return { hours: 0, minutes: 0, seconds: 0 };
-        }
-
-        const difference = deadline - now;
-        let timeLeft = {};
-
-        if (difference > 0) {
-            timeLeft = {
-                hours: Math.floor((difference / (1000 * 60 * 60)) % 24),
-                minutes: Math.floor((difference / 1000 / 60) % 60),
-                seconds: Math.floor((difference / 1000) % 60),
-            };
-        }
-
-        return timeLeft;
-    };
-
-    const [timeLeft, setTimeLeft] = useState(calculateTimeLeft());
-
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setTimeLeft(calculateTimeLeft());
-        }, 1000);
-
-        return () => clearTimeout(timer);
-    });
-
-    const timerComponents = [];
-    Object.keys(timeLeft).forEach((interval) => {
-        if (!timeLeft[interval] && interval !== 'seconds' && timeLeft['hours'] === 0 && timeLeft['minutes'] < 10) {
-            return;
-        }
-        timerComponents.push(
-            <span key={interval}>
-                {String(timeLeft[interval]).padStart(2, '0')}
-                {interval[0]}{' '}
-            </span>
-        );
-    });
-
-    return (
-        <div className="bg-red-600 text-white text-center p-3 font-semibold shadow-lg">
-            Ordering closes in: {timerComponents.length ? timerComponents : <span>Time's up!</span>}
-        </div>
-    );
-};
 
 
 function RestaurantPage() {
@@ -89,6 +34,11 @@ function RestaurantPage() {
     const [maxDeliveryTime, setMaxDeliveryTime] = useState('');
     const [sortBy, setSortBy] = useState('name'); // 'name', 'rating', 'deliveryTime'
     const [showFilters, setShowFilters] = useState(false);
+    const [isFetchingLocation, setIsFetchingLocation] = useState(false);
+    const [locationQuery, setLocationQuery] = useState('');
+    const [locationResults, setLocationResults] = useState([]);
+    const [isSearchingLocation, setIsSearchingLocation] = useState(false);
+    const [showLocationPicker, setShowLocationPicker] = useState(false);
     
     const { addToCart, increaseQuantity, decreaseQuantity, cartItems } = useCart();
     const { isLoggedIn } = useAuth();
@@ -97,20 +47,111 @@ function RestaurantPage() {
     const { toggleFavorite, isFavorited } = useFavorites();
     const navigate = useNavigate();
 
-    useEffect(() => {
-        const fetchRestaurants = async () => {
-            try {
-                const { data } = await axios.get(`${process.env.REACT_APP_API_URL}/api/restaurants`);
-                setRestaurants(data.data);
-            } catch (err) {
-                setError('Failed to fetch restaurants.');
-                console.error(err);
-            } finally {
-                setLoading(false);
+    // Helper to estimate delivery time based on distance (assuming avg speed 30km/h ~ 500m per min)
+    const getEstimatedTime = (distance) => {
+        if (!distance) return '';
+        const metersPerMinute = 500; // 30 km/h
+        const minutes = Math.ceil(distance / metersPerMinute);
+        return `${minutes} min${minutes > 1 ? 's' : ''}`;
+    };
+    const [locationStatus, setLocationStatus] = useState('Detecting your location...');
+
+    const fetchRestaurants = useCallback(async (lat = null, lng = null) => {
+        try {
+            let url = `${process.env.REACT_APP_API_URL}/api/restaurants`;
+            if (lat !== null && lng !== null) {
+                url = `${process.env.REACT_APP_API_URL}/api/restaurants/nearby?lat=${lat}&lng=${lng}&maxDistance=50000`; // 50km radius
+                setLocationStatus(`Showing restaurants near (${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}) 📍`);
+            } else {
+                setLocationStatus('Showing all restaurants 🌍 (Location disabled)');
             }
-        };
-        fetchRestaurants();
+
+            const { data } = await axios.get(url);
+            setRestaurants(data.data);
+            setError('');
+        } catch (err) {
+            setError('Failed to fetch restaurants.');
+            console.error(err);
+        } finally {
+            setLoading(false);
+            setIsFetchingLocation(false);
+        }
     }, []);
+
+    const fetchUsingCurrentLocation = useCallback(() => {
+        if (!navigator.geolocation) {
+            console.warn('Geolocation not supported by this browser.');
+            fetchRestaurants();
+            return;
+        }
+        setIsFetchingLocation(true);
+        navigator.geolocation.getCurrentPosition(
+            (position) => {
+                const lat = position.coords.latitude;
+                const lng = position.coords.longitude;
+                setLocationQuery('Using current location');
+                setLocationResults([]);
+                fetchRestaurants(lat, lng);
+            },
+            (err) => {
+                console.warn('Location Access Denied or Error:', err);
+                fetchRestaurants(); // Fallback to all
+            },
+            { timeout: 7000 }
+        );
+    }, [fetchRestaurants]);
+
+    const searchLocation = useCallback(async (query) => {
+        const trimmed = query.trim();
+        if (!trimmed || !process.env.REACT_APP_GOOGLE_MAPS_API_KEY) {
+            setLocationResults([]);
+            return;
+        }
+        try {
+            setIsSearchingLocation(true);
+            const { data } = await axios.get('https://maps.googleapis.com/maps/api/geocode/json', {
+                params: {
+                    address: trimmed,
+                    key: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
+                },
+            });
+            if (data.status !== 'OK' || !Array.isArray(data.results)) {
+                setLocationResults([]);
+                return;
+            }
+            const mapped = data.results.slice(0, 6).map((result) => ({
+                id: result.place_id,
+                label: result.formatted_address,
+                lat: result.geometry?.location?.lat,
+                lng: result.geometry?.location?.lng,
+            }));
+            setLocationResults(mapped.filter((x) => typeof x.lat === 'number' && typeof x.lng === 'number'));
+        } catch (e) {
+            console.error('Location search failed:', e);
+            setLocationResults([]);
+        } finally {
+            setIsSearchingLocation(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            searchLocation(locationQuery);
+        }, 300);
+        return () => clearTimeout(timer);
+    }, [locationQuery, searchLocation]);
+
+    const applySearchedLocation = async (item) => {
+        setLocationQuery(item.label);
+        setLocationResults([]);
+        setLoading(true);
+        setIsFetchingLocation(true);
+        await fetchRestaurants(item.lat, item.lng);
+    };
+
+    useEffect(() => {
+        fetchUsingCurrentLocation();
+    }, [fetchUsingCurrentLocation]);
 
     // Get unique cuisines and tags from restaurants
     const getUniqueCuisines = () => {
@@ -321,7 +362,6 @@ function RestaurantPage() {
             
             <Header />
             <NotAcceptingOrdersBanner />
-            { !isLoadingSettings && settings.isOrderingEnabled && <CountdownTimer closingTime={settings.orderClosingTime} /> }
 
             <main className="max-w-7xl mx-auto px-4 py-8 relative z-10">
                 
@@ -329,7 +369,7 @@ function RestaurantPage() {
                     <div className="fade-in">
                         <div className="mb-8 text-center">
                             <h2 className="text-4xl font-bold text-white mb-3 drop-shadow-lg">Restaurants Near You</h2>
-                            <p className="text-gray-200 text-lg drop-shadow-md">Discover amazing food from local restaurants</p>
+                            <p className="text-gray-200 text-lg drop-shadow-md">{locationStatus}</p>
                             <div className="w-24 h-1 bg-gradient-to-r from-orange-400 to-red-500 mx-auto mt-4 rounded-full"></div>
                         </div>
                         {/* Filter Bar Skeleton */}
@@ -351,12 +391,63 @@ function RestaurantPage() {
                     <div id="restaurantList" className="fade-in">
                          <div className="mb-8 text-center">
                              <h2 className="text-4xl font-bold text-white mb-3 drop-shadow-lg">Restaurants Near You</h2>
-                             <p className="text-gray-200 text-lg drop-shadow-md">Discover amazing food from local restaurants</p>
+                             <p className="text-gray-200 text-lg drop-shadow-md">{locationStatus}</p>
                              <div className="w-24 h-1 bg-gradient-to-r from-orange-400 to-red-500 mx-auto mt-4 rounded-full"></div>
                          </div>
 
                          {/* Search and Filter Bar */}
                          <div className="mb-6 bg-white bg-opacity-95 rounded-xl p-4 shadow-lg">
+                            {/* Location Controls */}
+                            <div className="mb-4 flex justify-end relative">
+                                <button
+                                    onClick={() => setShowLocationPicker((prev) => !prev)}
+                                    className="h-10 w-10 rounded-full bg-orange-500 text-white shadow-md hover:bg-orange-600 flex items-center justify-center"
+                                    title="Set delivery location"
+                                >
+                                    <MapPin size={18} />
+                                </button>
+                                {showLocationPicker && (
+                                    <div className="absolute top-12 right-0 w-80 bg-white border border-gray-200 rounded-xl shadow-lg p-3 z-30">
+                                        <p className="text-sm font-semibold text-gray-800 mb-2">Set delivery location</p>
+                                        <button
+                                            onClick={fetchUsingCurrentLocation}
+                                            disabled={isFetchingLocation}
+                                            className="w-full mb-2 px-3 py-2 text-sm bg-orange-500 text-white rounded-md hover:bg-orange-600 disabled:opacity-50"
+                                        >
+                                            {isFetchingLocation ? 'Detecting...' : 'Use current location'}
+                                        </button>
+                                        <div className="relative">
+                                            <input
+                                                type="text"
+                                                placeholder="Search area, locality, landmark..."
+                                                value={locationQuery}
+                                                onChange={(e) => setLocationQuery(e.target.value)}
+                                                className="w-full px-3 py-2 bg-white border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-orange-500"
+                                            />
+                                            {isSearchingLocation && (
+                                                <div className="absolute right-3 top-2 text-xs text-gray-500">Searching...</div>
+                                            )}
+                                            {locationResults.length > 0 && (
+                                                <div className="absolute left-0 right-0 mt-1 bg-white border border-gray-200 rounded-md shadow-lg z-40 max-h-56 overflow-y-auto">
+                                                    {locationResults.map((item) => (
+                                                        <button
+                                                            key={item.id}
+                                                            onClick={() => {
+                                                                applySearchedLocation(item);
+                                                                setShowLocationPicker(false);
+                                                            }}
+                                                            className="w-full text-left px-3 py-2 text-sm hover:bg-orange-50 border-b border-gray-100 last:border-b-0"
+                                                        >
+                                                            {item.label}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
                              {/* Search Bar */}
                              <div className="mb-4">
                                  <div className="relative">
@@ -575,12 +666,20 @@ function RestaurantPage() {
                                          
                                          <div className="flex items-center justify-between text-sm text-gray-500 mb-4">
                                              <Rating value={restaurant.averageRating} text={`${restaurant.numberOfReviews} reviews`} />
-                                             <span className="flex items-center">
-                                                 <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                                 </svg>
-                                                 {restaurant.deliveryTime}
-                                             </span>
+                                             <div className="flex flex-col items-end">
+                                                 <span className="flex items-center">
+                                                     <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                                     </svg>
+                                                     {restaurant.deliveryTime ? restaurant.deliveryTime : getEstimatedTime(restaurant.distance)}
+                                                 </span>
+                                                 {restaurant.distance !== undefined && (
+                                                     <span className="flex items-center text-orange-600 font-semibold mt-1">
+                                                         <MapPin size={14} className="mr-1" />
+                                                         {restaurant.distance > 1000 ? `${(restaurant.distance / 1000).toFixed(1)} km away` : `${Math.round(restaurant.distance)} m away`}
+                                                     </span>
+                                                 )}
+                                             </div>
                                          </div>
                                          
                                          <div className="flex flex-wrap gap-2">
@@ -755,7 +854,9 @@ function RestaurantPage() {
                                                     <div className="flex justify-between items-start">
                                                         <div className="flex-1">
                                                             <h4 className="text-lg font-semibold text-gray-900 mb-2">{item.name}</h4>
-                                                            <p className="text-gray-600 text-sm mb-3">Delicious and fresh</p>
+                                                            {item.description?.trim() && (
+                                                                <p className="text-gray-600 text-sm mb-3">{item.description}</p>
+                                                            )}
                                                             <div className="flex items-center justify-between">
                                                                 <span className="font-bold text-lg text-gray-800">₹{item.price}</span>
                                                                 

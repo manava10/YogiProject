@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useCart } from '../context/CartContext';
 import { useTheme } from '../context/ThemeContext';
 import UserProfile from './UserProfile';
+import { getDashboardPathForRole } from '../utils/postLoginRedirect';
 import './Header.css';
 
 const Header = () => {
@@ -19,6 +20,8 @@ const Header = () => {
         clearCart(); // Clear the cart from localStorage on logout
         navigate('/');
     };
+
+    const getDashboardRoute = () => getDashboardPathForRole(user?.role);
 
     const toggleProfileModal = () => {
         setIsProfileModalOpen(!isProfileModalOpen);
@@ -89,7 +92,7 @@ const Header = () => {
                         )}
                         {isLoggedIn ? (
                             <>
-                                <button onClick={() => navigate('/dashboard')} className="header-btn-primary primary">Dashboard</button>
+                                <button onClick={() => navigate(getDashboardRoute())} className="header-btn-primary primary">Dashboard</button>
                                 <button onClick={handleLogout} className="header-btn-primary destructive">Logout</button>
                                 <button onClick={toggleProfileModal} className="header-btn-icon user-profile-circle">
                                     {user && user.name ? user.name.charAt(0).toUpperCase() : '?'}
@@ -167,7 +170,7 @@ const Header = () => {
                     )}
                     {isLoggedIn ? (
                         <>
-                            <button onClick={() => handleMobileLinkClick('/dashboard')} className="mobile-menu-link">Dashboard</button>
+                            <button onClick={() => handleMobileLinkClick(getDashboardRoute())} className="mobile-menu-link">Dashboard</button>
                             <button onClick={handleMobileProfileClick} className="mobile-menu-link">My Profile</button>
                             <button onClick={() => { handleLogout(); setIsMobileMenuOpen(false); }} className="mobile-menu-link text-red-400">Logout</button>
                         </>

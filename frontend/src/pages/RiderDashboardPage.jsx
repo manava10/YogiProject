@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useAuth } from '../context/AuthContext';
+import { io } from 'socket.io-client';
 import Header from '../components/Header';
 import OrderManager from '../components/OrderManager';
 import RiderLocationSharer from '../components/RiderLocationSharer';
@@ -12,35 +13,159 @@ const RiderDashboardPage = () => {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
     const { user, authToken } = useAuth();
+    const [earnings, setEarnings] = useState(0);
+    const audioRef = useRef(null);
+    const soundEnabledRef = useRef(false);
+    const ringInProgressRef = useRef(false);
+    const seenOrderIdsRef = useRef(new Set());
+
+    const fetchOrdersRef = useRef(null);
+
+    const initAudio = useCallback(() => {
+        if (!audioRef.current) {
+            const audio = new Audio('/universfield-school-bell-199584.mp3');
+            audio.preload = 'auto';
+            audio.volume = 1;
+            audio.loop = false;
+            audioRef.current = audio;
+        }
+        return audioRef.current;
+    }, []);
+
+    const enableSound = useCallback(async () => {
+        try {
+            const audio = initAudio();
+            audio.loop = false;
+            await audio.play();
+            audio.pause();
+            audio.currentTime = 0;
+            soundEnabledRef.current = true;
+        } catch (e) {
+            // ignore audio failures
+        }
+    }, [initAudio]);
+
+    const playSoundOnce = useCallback(() => {
+        return new Promise((resolve) => {
+            if (!soundEnabledRef.current) return resolve();
+            const audio = initAudio();
+            audio.loop = false;
+            audio.currentTime = 0;
+            const handleEnd = () => {
+                audio.removeEventListener('ended', handleEnd);
+                resolve();
+            };
+            audio.addEventListener('ended', handleEnd);
+            audio.play().catch(() => {
+                audio.removeEventListener('ended', handleEnd);
+                resolve();
+            });
+        });
+    }, [initAudio]);
+
+    const playAssignedSoundTwice = useCallback(async () => {
+        if (ringInProgressRef.current || !soundEnabledRef.current) return;
+        ringInProgressRef.current = true;
+        await playSoundOnce();
+        await playSoundOnce();
+        ringInProgressRef.current = false;
+    }, [playSoundOnce]);
+
+    const fetchOrders = useCallback(async () => {
+        if (!authToken) {
+            setLoading(false);
+            return;
+        }
+        try {
+            setError(null);
+            const config = {
+                headers: { Authorization: `Bearer ${authToken}` },
+            };
+            const { data } = await axios.get(
+                `${process.env.REACT_APP_API_URL}/api/admin/orders?limit=1000`,
+                config
+            );
+            const validOrders = (data.data || []).filter(o => o.user);
+            const nextOrders = validOrders;
+            const nextIds = new Set(nextOrders.map((o) => o._id));
+            const seen = seenOrderIdsRef.current;
+
+            const newAssigned = nextOrders.filter(
+                (o) => o && !seen.has(o._id) && o.status === 'Out for Delivery'
+            );
+
+            nextIds.forEach((id) => seen.add(id));
+            if (newAssigned.length > 0) {
+                playAssignedSoundTwice();
+            }
+            setOrders(validOrders);
+        } catch (err) {
+            console.error('Failed to fetch orders:', err);
+            setError(err.response?.data?.msg || 'Failed to load orders');
+            setOrders([]);
+        } finally {
+            setLoading(false);
+        }
+    }, [authToken, playAssignedSoundTwice]);
 
     useEffect(() => {
-        const fetchOrders = async () => {
-            if (!authToken) {
-                setLoading(false);
-                return;
-            }
+        fetchOrdersRef.current = fetchOrders;
+        fetchOrders();
+    }, [fetchOrders]);
+
+    // Unlock sound after first user interaction (browser autoplay policy)
+    useEffect(() => {
+        const unlock = async () => {
+            await enableSound();
+            window.removeEventListener('pointerdown', unlock);
+            window.removeEventListener('keydown', unlock);
+        };
+        window.addEventListener('pointerdown', unlock);
+        window.addEventListener('keydown', unlock);
+        return () => {
+            window.removeEventListener('pointerdown', unlock);
+            window.removeEventListener('keydown', unlock);
+        };
+    }, [enableSound]);
+
+    const fetchMe = useCallback(async () => {
+        if (!authToken) return;
+        try {
+            const { data } = await axios.get(`${process.env.REACT_APP_API_URL}/api/auth/me`, {
+                headers: { Authorization: `Bearer ${authToken}` },
+            });
+            setEarnings(data?.data?.earnings || 0);
+        } catch (e) {
+            // ignore
+        }
+    }, [authToken]);
+
+    // Rider earnings + availability
+    useEffect(() => {
+        fetchMe();
+    }, [fetchMe]);
+
+    // Real-time updates for assigned orders
+    useEffect(() => {
+        if (!authToken) return;
+        const socket = io(process.env.REACT_APP_API_URL, {
+            auth: { token: authToken },
+            transports: ['websocket'],
+        });
+
+        socket.on('order:updated', () => {
+            if (fetchOrdersRef.current) fetchOrdersRef.current();
+            fetchMe();
+        });
+
+        return () => {
             try {
-                setError(null);
-                const config = {
-                    headers: { Authorization: `Bearer ${authToken}` },
-                };
-                const { data } = await axios.get(
-                    `${process.env.REACT_APP_API_URL}/api/admin/orders?limit=1000`,
-                    config
-                );
-                const validOrders = (data.data || []).filter(o => o.user);
-                setOrders(validOrders);
-            } catch (err) {
-                console.error('Failed to fetch orders:', err);
-                setError(err.response?.data?.msg || 'Failed to load orders');
-                setOrders([]);
-            } finally {
-                setLoading(false);
+                socket.disconnect();
+            } catch (e) {
+                // ignore
             }
         };
-
-        fetchOrders();
-    }, [authToken]);
+    }, [authToken, fetchMe]);
 
     const isRider = user?.role === 'rider';
 
@@ -52,6 +177,15 @@ const RiderDashboardPage = () => {
                 <h1 className="text-4xl font-bold text-white text-center mb-8">
                     {isRider ? 'Rider Dashboard' : 'Delivery Admin Dashboard'}
                 </h1>
+
+                {isRider && (
+                    <div className="bg-white/95 dark:bg-gray-800 rounded-lg shadow-lg p-6 text-center mb-6">
+                        <p className="text-sm text-gray-600 dark:text-gray-400">Total Earnings</p>
+                        <p className="text-3xl font-bold text-gray-900 dark:text-white">
+                            ₹{Number(earnings || 0).toFixed(2)}
+                        </p>
+                    </div>
+                )}
 
                 {loading ? (
                     <AdminPageSkeleton />

@@ -72,9 +72,10 @@ export const AuthProvider = ({ children }) => {
         try {
             const { data } = await axios.post(`${process.env.REACT_APP_API_URL}/api/auth/login`, { email, password });
             localStorage.setItem('authToken', data.token);
-            setUser(data.user); // Restore this line to use the user object from the response
-            setIsLoggedIn(true); // Restore this line for immediate state update
+            setUser(data.user);
+            setIsLoggedIn(true);
             setAuthToken(data.token);
+            return data;
         } catch (error) {
             console.error('Login failed:', error);
             throw error;

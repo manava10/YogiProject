@@ -45,6 +45,12 @@ const OrderSchema = new mongoose.Schema({
         type: String,
         required: true,
     },
+    // Cached geocoded customer coordinates for ETA recalculation.
+    // GeoJSON is {lat,lng} for simplicity.
+    customerLocation: {
+        lat: { type: Number },
+        lng: { type: Number },
+    },
     status: {
         type: String,
         required: true,
@@ -73,6 +79,8 @@ const OrderSchema = new mongoose.Schema({
         default: 0,
         min: 0,
     },
+    // Prevent double-awarding customer credits for Delivered orders.
+    customerCreditsAwarded: { type: Boolean, default: false },
     assignedRider: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -82,6 +90,36 @@ const OrderSchema = new mongoose.Schema({
         lng: { type: Number },
         updatedAt: { type: Date },
     },
+    // Pricing breakdown (server-calculated)
+    couponDiscountPrice: { type: Number, default: 0.0, min: 0 },
+    foodPayablePrice: { type: Number, default: 0.0, min: 0 }, // after coupon + credits
+    platformFeePrice: { type: Number, default: 12.0, min: 0 }, // fixed per order
+    // Revenue split:
+    // - riderEarning: delivery charge
+    // - superadminEarning: taxes + platform fee
+    riderEarning: { type: Number, default: 0.0, min: 0 },
+    superadminEarning: { type: Number, default: 0.0, min: 0 },
+
+    // Rider assignment system
+    pendingRiderAssignment: { type: Boolean, default: false },
+    pendingRiderAssignmentRetryAt: { type: Date },
+    pendingRiderAssignmentStartedAt: { type: Date },
+    cancelledDueToNoRider: { type: Boolean, default: false },
+    systemCancelNote: { type: String },
+    // For accounting: when we cancel due to rider unavailability, superadmin covers restaurant food cost.
+    superadminFoodCompensationPrice: { type: Number, default: 0.0, min: 0 },
+    // Prevent double-awarding rider delivery earnings for Delivered orders.
+    riderEarningsAwarded: { type: Boolean, default: false },
+
+    // Delivery distance for transparency (meters + derived km)
+    deliveryDistanceMeters: { type: Number },
+    deliveryDistanceKm: { type: Number },
+
+    // Delivery ETA (seconds): restaurant -> customer at order creation,
+    // then computed at rider assignment using rider -> restaurant pickup time.
+    deliveryDurationSeconds: { type: Number },
+    pickupDurationSeconds: { type: Number },
+    etaSeconds: { type: Number },
 });
 
 // Indexes for better query performance
@@ -93,5 +131,6 @@ OrderSchema.index({ user: 1, createdAt: -1 }); // For user orders sorted by date
 OrderSchema.index({ user: 1, status: 1, createdAt: -1 }); // Compound index for filtered user orders
 OrderSchema.index({ user: 1, createdAt: -1, status: 1 }); // Alternative compound index
 OrderSchema.index({ assignedRider: 1, status: 1 }); // For rider's assigned orders
+OrderSchema.index({ pendingRiderAssignment: 1, pendingRiderAssignmentRetryAt: 1 });
 
 module.exports = mongoose.model('Order', OrderSchema);

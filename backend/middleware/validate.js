@@ -286,6 +286,17 @@ const schemas = {
         lng: Joi.number().required()
     }),
 
+    // Riders: update delivery availability (opt-in / opt-out)
+    updateRiderAvailability: Joi.object({
+        enabled: Joi.boolean().required()
+    }),
+
+    // Riders: update global rider location for matching (idle + busy)
+    updateRiderGlobalLocation: Joi.object({
+        lat: Joi.number().required(),
+        lng: Joi.number().required()
+    }),
+
     // Restaurant creation schema (admin)
     createRestaurant: Joi.object({
         name: Joi.string().trim().min(2).max(100).required(),

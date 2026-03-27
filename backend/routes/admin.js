@@ -1,6 +1,15 @@
 const express = require('express');
 const router = express.Router();
-const { getAllOrders, updateOrderStatus, creditAllUsers, resetAllCredits, getRiders, updateRiderLocation } = require('../controllers/admin');
+const { 
+    getAllOrders, 
+    updateOrderStatus, 
+    creditAllUsers, 
+    resetAllCredits, 
+    getRiders, 
+    updateRiderLocation,
+    updateRiderAvailability,
+    updateRiderGlobalLocation
+} = require('../controllers/admin');
 const { getCoupons, createCoupon, deleteCoupon } = require('../controllers/coupons');
 const { 
     getAllRestaurants,
@@ -27,6 +36,13 @@ router.route('/orders/export')
 
 router.route('/orders/:id/location')
     .put(protect, authorize('admin', 'deliveryadmin', 'rider'), validate(schemas.updateRiderLocation), updateRiderLocation);
+
+// Riders: opt-in/out of delivery + share location when enabled
+router.route('/rider/availability')
+    .put(protect, authorize('rider'), validate(schemas.updateRiderAvailability), updateRiderAvailability);
+
+router.route('/rider/location')
+    .put(protect, authorize('rider'), validate(schemas.updateRiderGlobalLocation), updateRiderGlobalLocation);
 
 router.route('/orders/:id')
     .put(protect, authorize('admin', 'deliveryadmin', 'rider'), validate(schemas.updateOrderStatus), updateOrderStatus);

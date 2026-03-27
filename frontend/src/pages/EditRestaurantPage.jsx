@@ -23,7 +23,7 @@ const EditRestaurantPage = () => {
     });
     const [newMenuItem, setNewMenuItem] = useState({
         name: '',
-        description: '', // Note: description is not in your MenuSchema, consider adding it
+        description: '',
         price: '',
         category: '',
         imageUrl: ''

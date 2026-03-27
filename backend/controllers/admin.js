@@ -1,5 +1,6 @@
 const Order = require('../models/Order');
 const User = require('../models/User');
+const Restaurant = require('../models/Restaurant');
 const sendEmail = require('../utils/sendEmail');
 const generateInvoicePdf = require('../utils/generateInvoicePdf');
 const logger = require('../utils/logger');
@@ -193,6 +194,16 @@ exports.updateOrderStatus = async (req, res) => {
         const oldStatus = order.status;
         order.status = status;
 
+        // If the order is cancelled for any reason, stop any pending rider assignment retries.
+        if (status === 'Cancelled') {
+            order.pendingRiderAssignment = false;
+            order.pendingRiderAssignmentRetryAt = undefined;
+            order.pendingRiderAssignmentStartedAt = undefined;
+            if (!order.cancelledDueToNoRider) {
+                order.systemCancelNote = undefined;
+            }
+        }
+
         // Assign rider when status is Out for Delivery (admin/deliveryadmin only)
         if (status === 'Out for Delivery' && (req.user.role === 'admin' || req.user.role === 'deliveryadmin')) {
             if (assignedRider) {
@@ -203,16 +214,30 @@ exports.updateOrderStatus = async (req, res) => {
         }
         
         // If the status changed to 'Delivered', award credits (2% of order value)
-        if (status === 'Delivered' && oldStatus !== 'Delivered' && !order.creditsEarned) {
+        if (status === 'Delivered' && oldStatus !== 'Delivered' && !order.customerCreditsAwarded) {
             const creditsToAward = Math.floor(order.totalPrice * 0.02); // 2% of order value
             order.creditsEarned = creditsToAward;
-            
-            // Add credits to user account
+            order.customerCreditsAwarded = true;
+
+            // Add credits to customer account
             await User.findByIdAndUpdate(order.user, {
                 $inc: { credits: creditsToAward }
             });
-            
-            logger.info(`Awarded ${creditsToAward} credits to user ${order.user} for order ${order._id}`);
+
+            logger.info(`Awarded ${creditsToAward} credits to customer ${order.user} for order ${order._id}`);
+        }
+
+        // If the order is Delivered, award delivery earnings to the assigned rider.
+        if (status === 'Delivered' && oldStatus !== 'Delivered' && order.assignedRider && !order.riderEarningsAwarded) {
+            const riderEarning = Math.round((order.shippingPrice || 0) * 100) / 100;
+            order.riderEarning = riderEarning;
+            order.riderEarningsAwarded = true;
+
+            await User.findByIdAndUpdate(order.assignedRider, {
+                $inc: { earnings: riderEarning }
+            });
+
+            logger.info(`Awarded delivery ₹${riderEarning} to rider ${order.assignedRider} for order ${order._id}`);
         }
         
         const updatedOrder = await order.save();
@@ -251,6 +276,52 @@ exports.updateOrderStatus = async (req, res) => {
                 console.error('Failed to send delivery confirmation email:', emailError);
                 // We don't block the main response for this, just log the error
             }
+        }
+
+        // Real-time update: notify the customer dashboard
+        try {
+            const io = req.app.get('io');
+            if (io) {
+                const restaurantDoc = await Restaurant.findById(updatedOrder.restaurant).select('owner');
+                const restaurantOwnerId = restaurantDoc?.owner?.toString();
+
+                const userId =
+                    updatedOrder?.user?._id
+                        ? updatedOrder.user._id.toString()
+                        : updatedOrder?.user
+                          ? updatedOrder.user.toString()
+                          : null;
+
+                const riderId =
+                    updatedOrder?.assignedRider?._id
+                        ? updatedOrder.assignedRider._id.toString()
+                        : updatedOrder?.assignedRider
+                          ? updatedOrder.assignedRider.toString()
+                          : null;
+
+                if (userId) {
+                    io.to(`user:${userId}`).emit('order:updated', {
+                        orderId: updatedOrder._id.toString(),
+                        status: updatedOrder.status,
+                    });
+                }
+
+                if (restaurantOwnerId) {
+                    io.to(`user:${restaurantOwnerId}`).emit('order:updated', {
+                        orderId: updatedOrder._id.toString(),
+                        status: updatedOrder.status,
+                    });
+                }
+
+                if (riderId) {
+                    io.to(`user:${riderId}`).emit('order:updated', {
+                        orderId: updatedOrder._id.toString(),
+                        status: updatedOrder.status,
+                    });
+                }
+            }
+        } catch (e) {
+            // ignore websocket failures
         }
 
         res.json(updatedOrder);
@@ -333,13 +404,31 @@ exports.exportDailyOrders = async (req, res) => {
 // @access  Private (Admin, DeliveryAdmin)
 exports.getRiders = async (req, res) => {
     try {
-        const riders = await User.find({ role: 'rider' })
+        const cutoff = new Date(Date.now() - 2 * 60 * 1000);
+
+        // Idle riders = opted-in + recently shared location + no active Out for Delivery
+        const riders = await User.find({
+            role: 'rider',
+            deliveryAvailability: true,
+            'riderLocation.lat': { $ne: null },
+            'riderLocation.lng': { $ne: null },
+            'riderLocation.updatedAt': { $gte: cutoff },
+        })
             .select('name email contactNumber _id')
             .sort({ name: 1 })
             .lean();
 
-        logger.info(`Admin ${req.user.id} fetched riders list`, { count: riders.length });
-        res.json({ success: true, data: riders });
+        const riderIds = riders.map((r) => r._id);
+        const activeOrders = await Order.find({
+            status: 'Out for Delivery',
+            assignedRider: { $in: riderIds },
+        }).select('assignedRider').lean();
+
+        const busySet = new Set(activeOrders.map((o) => o.assignedRider.toString()));
+        const idleRiders = riders.filter((r) => !busySet.has(r._id.toString()));
+
+        logger.info(`Admin ${req.user.id} fetched idle riders list`, { count: idleRiders.length });
+        res.json({ success: true, data: idleRiders });
     } catch (error) {
         logger.error('Get riders error:', { error: error.message, stack: error.stack, userId: req.user.id });
         res.status(500).json({ msg: 'Server Error' });
@@ -381,6 +470,75 @@ exports.updateRiderLocation = async (req, res) => {
         res.json({ success: true, riderLocation: order.riderLocation });
     } catch (error) {
         logger.error('Update rider location error:', { error: error.message, stack: error.stack, orderId: req.params.id, userId: req.user.id });
+        res.status(500).json({ msg: 'Server Error' });
+    }
+};
+
+// @desc    Rider: opt-in/out of sharing location for matching
+// @route   PUT /api/admin/rider/availability
+// @access  Private (Rider only)
+exports.updateRiderAvailability = async (req, res) => {
+    try {
+        const { enabled } = req.body;
+        const user = await User.findById(req.user.id);
+        if (!user || user.role !== 'rider') {
+            return res.status(404).json({ msg: 'Rider not found' });
+        }
+
+        user.deliveryAvailability = !!enabled;
+
+        // When disabled, clear location so they won't be considered for matching.
+        if (!user.deliveryAvailability) {
+            user.riderLocation = undefined;
+        }
+
+        await user.save();
+        res.json({
+            success: true,
+            data: {
+                deliveryAvailability: user.deliveryAvailability,
+                riderLocation: user.riderLocation || null,
+            },
+        });
+    } catch (error) {
+        logger.error('Update rider availability error:', {
+            error: error.message,
+            stack: error.stack,
+            userId: req.user?.id,
+        });
+        res.status(500).json({ msg: 'Server Error' });
+    }
+};
+
+// @desc    Rider: update global rider location (idle + busy) for matching
+// @route   PUT /api/admin/rider/location
+// @access  Private (Rider only)
+exports.updateRiderGlobalLocation = async (req, res) => {
+    try {
+        const { lat, lng } = req.body;
+        const user = await User.findById(req.user.id);
+
+        if (!user || user.role !== 'rider') {
+            return res.status(404).json({ msg: 'Rider not found' });
+        }
+        if (!user.deliveryAvailability) {
+            return res.status(403).json({ msg: 'Delivery availability is OFF. Enable it to share location.' });
+        }
+
+        user.riderLocation = {
+            lat: Number(lat),
+            lng: Number(lng),
+            updatedAt: new Date(),
+        };
+
+        await user.save();
+        res.json({ success: true, riderLocation: user.riderLocation });
+    } catch (error) {
+        logger.error('Update rider global location error:', {
+            error: error.message,
+            stack: error.stack,
+            userId: req.user?.id,
+        });
         res.status(500).json({ msg: 'Server Error' });
     }
 };

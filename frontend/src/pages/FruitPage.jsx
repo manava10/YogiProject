@@ -15,62 +15,6 @@ import './RestaurantPage.css';
 // For now, let's use a fruit-themed background placeholder or style
 import fruitBackground from '../assets/images/fruit-background.jpg';
 
-const CountdownTimer = ({ closingTime }) => {
-    // ... (Same as RestaurantPage)
-    // Duplicated logic for now, ideally move to utils/components
-    const calculateTimeLeft = () => {
-        if (!closingTime) return { hours: 0, minutes: 0, seconds: 0 };
-        const [hours, minutes] = closingTime.split(':');
-        const now = new Date();
-        const deadline = new Date();
-        deadline.setHours(hours, minutes, 0, 0);
-
-        if (now > deadline) {
-            return { hours: 0, minutes: 0, seconds: 0 };
-        }
-
-        const difference = deadline - now;
-        let timeLeft = {};
-
-        if (difference > 0) {
-            timeLeft = {
-                hours: Math.floor((difference / (1000 * 60 * 60)) % 24),
-                minutes: Math.floor((difference / 1000 / 60) % 60),
-                seconds: Math.floor((difference / 1000) % 60),
-            };
-        }
-        return timeLeft;
-    };
-
-    const [timeLeft, setTimeLeft] = useState(calculateTimeLeft());
-
-    useEffect(() => {
-        const timer = setTimeout(() => {
-            setTimeLeft(calculateTimeLeft());
-        }, 1000);
-        return () => clearTimeout(timer);
-    });
-
-    const timerComponents = [];
-    Object.keys(timeLeft).forEach((interval) => {
-        if (!timeLeft[interval] && interval !== 'seconds' && timeLeft['hours'] === 0 && timeLeft['minutes'] < 10) {
-            return;
-        }
-        timerComponents.push(
-            <span key={interval}>
-                {String(timeLeft[interval]).padStart(2, '0')}
-                {interval[0]}{' '}
-            </span>
-        );
-    });
-
-    return (
-        <div className="bg-green-600 text-white text-center p-3 font-semibold shadow-lg">
-            Fresh Fruits ordering closes in: {timerComponents.length ? timerComponents : <span>Time's up!</span>}
-        </div>
-    );
-};
-
 
 function FruitPage() {
     const [fruitStalls, setFruitStalls] = useState([]);
@@ -215,7 +159,6 @@ function FruitPage() {
             
             <Header />
             <NotAcceptingOrdersBanner />
-            { !isLoadingSettings && settings.isOrderingEnabled && <CountdownTimer closingTime={settings.orderClosingTime} /> }
 
             <main className="max-w-7xl mx-auto px-4 py-8 relative z-10">
                 
